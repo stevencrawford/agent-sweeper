@@ -6,6 +6,7 @@ package tui
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/stevencrawford/agent-sweeper/internal/engine"
 	"github.com/stevencrawford/agent-sweeper/internal/model"
+	"github.com/stevencrawford/agent-sweeper/internal/protect"
 	"github.com/stevencrawford/agent-sweeper/internal/units"
 )
 
@@ -70,6 +72,15 @@ type Model struct {
 	reclaimBytes int64
 	protected    int
 
+	// protector marks which sessions are currently open. It is run once at
+	// load to seed the pickers (via NewWithProtection) and again at confirm,
+	// so deletion never touches a session that became active after the
+	// dry-run. nil disables protection (tests, prototype data).
+	protector protect.Protector
+	// active maps a protected session id to why it is protected, for the
+	// current sweep's dry-run display.
+	active map[string]protect.Reason
+
 	progress float64
 	done     bool
 }
@@ -79,7 +90,37 @@ func New(agents []model.Agent) *Model {
 	return &Model{
 		agents:   agents,
 		selected: map[int]bool{},
+		active:   map[string]protect.Reason{},
 	}
+}
+
+// NewWithProtection builds the TUI with a live protector, marking every
+// currently-open session Active before the first render.
+func NewWithProtection(agents []model.Agent, fn protect.Protector) *Model {
+	m := New(agents)
+	m.ApplyActive(fn, time.Now())
+	return m
+}
+
+// ApplyActive marks in place every session the protector reports as open and
+// records the reasons for the dry-run. The protector is retained so the
+// confirm step can re-validate against a fresh scan.
+func (m *Model) ApplyActive(fn protect.Protector, now time.Time) {
+	if fn == nil {
+		return
+	}
+	m.protector = fn
+	active := protect.Report{}
+	for i := range m.agents {
+		r := fn(m.agents[i], now)
+		for j := range m.agents[i].Sessions {
+			if _, ok := r[m.agents[i].Sessions[j].ID]; ok {
+				m.agents[i].Sessions[j].Active = true
+			}
+		}
+		maps.Copy(active, r)
+	}
+	m.active = active
 }
 
 // Init implements tea.Model.
@@ -238,6 +279,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			m.computeMatches()
+			if len(m.matches) == 0 {
+				// Decision 10: with nothing to delete the confirm step is
+				// nonsensical — surface why and stay on the picker.
+				age := model.Ages[m.ageIdx]
+				reason := "nothing matches this selection"
+				if m.protected > 0 {
+					reason = "every matching session is active or protected"
+				}
+				m.err = warnStyle.Render(reason + fmt.Sprintf(" — try a longer age than %s", age.Label))
+				return m, nil
+			}
 			m.screen = screenDryRun
 		case "esc":
 			if m.mode == modeGit {
@@ -256,6 +308,29 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenConfirm:
 		switch msg.String() {
 		case "y", "Y":
+			if m.protector != nil {
+				// Decision 10: re-validate protection against a fresh scan
+				// immediately before deleting — a session opened since the
+				// dry-run must never be swept.
+				agent := m.agents[m.agentIdx]
+				fresh := m.protector(agent, time.Now())
+				kept := m.matches[:0]
+				var reclaim int64
+				for _, s := range m.matches {
+					if _, active := fresh[s.ID]; active {
+						continue
+					}
+					kept = append(kept, s)
+					reclaim += engine.SessionReclaim(s)
+				}
+				m.matches = kept
+				m.reclaimBytes = reclaim
+				if len(m.matches) == 0 {
+					m.err = warnStyle.Render("nothing to delete — every remaining session is now active")
+					m.screen = screenDryRun
+					return m, nil
+				}
+			}
 			m.screen = screenProgress
 			m.progress = 0
 			m.done = false
@@ -289,7 +364,7 @@ func (m *Model) advanceProgress() tea.Cmd {
 
 // computeMatches applies the age bucket and protection to the selected
 // groups (directories or branches, per mode), producing the sessions a
-// confirmed sweep would delete.
+// confirmed sweep would delete and counting the active ones spared.
 func (m *Model) computeMatches() {
 	age := model.Ages[m.ageIdx]
 	var matches []model.Session
@@ -303,7 +378,7 @@ func (m *Model) computeMatches() {
 			sessions = m.groups[idx].Sessions
 		}
 		for _, s := range sessions {
-			if s.Active {
+			if _, active := m.active[s.ID]; active {
 				protected++
 				continue
 			}
@@ -421,6 +496,9 @@ func (m *Model) viewAge() string {
 			b.WriteString("\n" + rowStyle.Render("  "+line))
 		}
 	}
+	if m.err != "" {
+		b.WriteString("\n\n" + m.err)
+	}
 	b.WriteString("\n\n" + hintStyle.Render("↑/↓ move · enter select · esc back"))
 	return b.String()
 }
@@ -435,7 +513,12 @@ func (m *Model) viewDryRun() string {
 		label, sessions := groupLabel(m, idx)
 		b.WriteString("\n\n" + okStyle.Render("▣ "+label) + dimStyle.Render(fmt.Sprintf("  %d sessions", len(sessions))))
 		for _, s := range sessions {
-			if s.Active || !age.Matches(s.LastActivity) {
+			reason, protected := m.active[s.ID]
+			if protected {
+				fmt.Fprintf(&b, "\n   %-42s %-10s %s", dimStyle.Render(s.Title), dimStyle.Render("protected"), dimStyle.Render(protect.ReasonText(reason)))
+				continue
+			}
+			if !age.Matches(s.LastActivity) {
 				continue
 			}
 			extra := ""
@@ -450,7 +533,11 @@ func (m *Model) viewDryRun() string {
 	if m.protected > 0 {
 		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d active sessions are protected and never swept", m.protected)))
 	}
-	b.WriteString("\n\n" + hintStyle.Render("enter continue · esc back"))
+	if m.err != "" {
+		b.WriteString("\n\n" + m.err)
+	} else {
+		b.WriteString("\n\n" + hintStyle.Render("enter continue · esc back"))
+	}
 	return b.String()
 }
 

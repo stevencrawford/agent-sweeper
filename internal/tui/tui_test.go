@@ -3,10 +3,13 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/stevencrawford/agent-sweeper/internal/mock"
+	"github.com/stevencrawford/agent-sweeper/internal/model"
+	"github.com/stevencrawford/agent-sweeper/internal/protect"
 )
 
 func press(t *testing.T, m *Model, keys ...string) *Model {
@@ -133,5 +136,122 @@ func TestEscNavigatesBack(t *testing.T) {
 	m = press(t, m, "esc")   // back to agent
 	if m.screen != screenAgent {
 		t.Fatalf("after esc want agent picker, got screen %d", m.screen)
+	}
+}
+
+// toDryRun drives the flow for the default agent (OpenCode) into directory
+// mode, selects the first directory, and accepts the default age, landing on
+// the dry run.
+func toDryRun(t *testing.T, m *Model) *Model {
+	t.Helper()
+	m = press(t, m, "enter")          // agent -> mode
+	m = press(t, m, "enter")          // directory mode -> dir picker
+	m = press(t, m, " ", "enter")     // select first directory -> age picker
+	m = press(t, m, "enter")          // age 1d -> dry run
+	return m
+}
+
+func TestProtectedSessionExcludedAndListed(t *testing.T) {
+	stub := func(a model.Agent, now time.Time) protect.Report {
+		if a.Name == "OpenCode" {
+			return protect.Report{"oc-0001": protect.ReasonRecent}
+		}
+		return protect.Report{}
+	}
+	m := NewWithProtection(mock.Agents(), stub)
+	m = toDryRun(t, m)
+
+	if m.screen != screenDryRun {
+		t.Fatalf("want dry run, got screen %d", m.screen)
+	}
+	if m.protected != 1 {
+		t.Fatalf("want 1 protected session, got %d", m.protected)
+	}
+	for _, s := range m.matches {
+		if s.ID == "oc-0001" {
+			t.Fatal("protected session must never appear in matches")
+		}
+	}
+	view := m.View()
+	if !strings.Contains(view, "protected") {
+		t.Fatalf("dry run should list the protected session, got:\n%s", view)
+	}
+	if !strings.Contains(view, protect.ReasonText(protect.ReasonRecent)) {
+		t.Fatalf("dry run should explain why the session is protected, got:\n%s", view)
+	}
+}
+
+func TestNothingToDeleteBlocksConfirm(t *testing.T) {
+	// Protect every OpenCode session so the selection has nothing to sweep.
+	stub := func(a model.Agent, now time.Time) protect.Report {
+		rep := protect.Report{}
+		for _, s := range a.Sessions {
+			if a.Name == "OpenCode" {
+				rep[s.ID] = protect.ReasonRunning
+			}
+		}
+		return rep
+	}
+	m := NewWithProtection(mock.Agents(), stub)
+	m = press(t, m, "enter")      // agent -> mode
+	m = press(t, m, "enter")      // directory mode -> dir picker
+	m = press(t, m, " ", "enter") // select first directory -> age picker
+	m = press(t, m, "enter")      // age 1d -> nothing to delete
+
+	if m.screen != screenAge {
+		t.Fatalf("0 matches must block the confirm, want age picker, got screen %d", m.screen)
+	}
+	if !strings.Contains(m.View(), "try a longer age") {
+		t.Fatalf("age picker should explain nothing matches, got:\n%s", m.View())
+	}
+}
+
+func TestConfirmRevalidatesProtection(t *testing.T) {
+	calls := 0
+	stub := func(a model.Agent, now time.Time) protect.Report {
+		calls++
+		// The second scan (at confirm) finds oc-0002 now open.
+		if a.Name == "OpenCode" && calls >= 2 {
+			return protect.Report{"oc-0002": protect.ReasonRunning}
+		}
+		return protect.Report{}
+	}
+	m := NewWithProtection(mock.Agents(), stub)
+	m = toDryRun(t, m)
+	if len(m.matches) != 2 {
+		t.Fatalf("before confirm both oc-0001 and oc-0002 should match, got %d", len(m.matches))
+	}
+	m = press(t, m, "enter", "y")
+	if m.screen != screenProgress {
+		t.Fatalf("after confirm want progress, got screen %d", m.screen)
+	}
+	for _, s := range m.matches {
+		if s.ID == "oc-0002" {
+			t.Fatal("oc-0002 became active at confirm and must be dropped")
+		}
+	}
+}
+
+func TestConfirmBlocksWhenEverythingRevalidatedActive(t *testing.T) {
+	calls := 0
+	stub := func(a model.Agent, now time.Time) protect.Report {
+		calls++
+		if a.Name == "OpenCode" && calls >= 2 {
+			rep := protect.Report{}
+			for _, s := range a.Sessions {
+				rep[s.ID] = protect.ReasonRunning
+			}
+			return rep
+		}
+		return protect.Report{}
+	}
+	m := NewWithProtection(mock.Agents(), stub)
+	m = toDryRun(t, m)
+	m = press(t, m, "enter", "y")
+	if m.screen != screenDryRun {
+		t.Fatalf("when every session revalidates active, confirm must block, got screen %d", m.screen)
+	}
+	if !strings.Contains(m.View(), "now active") {
+		t.Fatalf("dry run should explain the block, got:\n%s", m.View())
 	}
 }

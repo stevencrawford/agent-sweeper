@@ -34,7 +34,7 @@ func Agents() []model.Agent {
 			DataRoot: "~/.copilot",
 			Sessions: []model.Session{
 				{ID: "cp-001", Title: "migrate deploy pipeline", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(3 * day), SizeBytes: 9 << 20},
-				{ID: "cp-002", Title: "rewind snapshot test", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(35 * day), SizeBytes: 61 << 20, Active: true},
+				{ID: "cp-002", Title: "rewind snapshot test", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(35 * day), SizeBytes: 61 << 20},
 				{ID: "cp-003", Title: "session-state dir walk", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(60 * day), SizeBytes: 33 << 20},
 				{ID: "cp-004", Title: "plan.md cleanup", CWD: "/Users/stcrawfo/Development/javascript/side-project", Label: "/Users/stcrawfo/Development/javascript/side-project", LastActivity: ago(200 * day), SizeBytes: 12 << 20},
 			},
@@ -43,7 +43,7 @@ func Agents() []model.Agent {
 			Name:     "Claude Code",
 			DataRoot: "~/.claude",
 			Sessions: []model.Session{
-				{ID: "cc-aaa1", Title: "grill ticket 06", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(1 * day), SizeBytes: 5 << 20},
+				{ID: "cc-aaa1", Title: "grill ticket 06", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(10 * time.Hour), SizeBytes: 5 << 20},
 				{ID: "cc-aaa2", Title: "age enum semantics", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(10 * day), SizeBytes: 11 << 20},
 				{ID: "cc-bbb1", Title: "omnivue frontend polish", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(80 * day), SizeBytes: 2 << 20},
 				{ID: "cc-bbb2", Title: "todos tidy", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(120 * day), SizeBytes: 1 << 20},
@@ -55,7 +55,7 @@ func Agents() []model.Agent {
 			Sessions: []model.Session{
 				{ID: "cx-77", Title: "goreleaser config", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(4 * day), SizeBytes: 3 << 20},
 				{ID: "cx-78", Title: "release pipeline", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(7 * day), SizeBytes: 1 << 20},
-				{ID: "cx-99", Title: "codex tui log", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(150 * day), SizeBytes: 7 << 20, Active: true},
+				{ID: "cx-99", Title: "codex tui log", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(150 * day), SizeBytes: 7 << 20},
 			},
 		},
 		{
@@ -72,7 +72,7 @@ func Agents() []model.Agent {
 			Sessions: []model.Session{
 				{ID: "cur-1", Title: "state.vscdb kv probe", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(5 * day), SizeBytes: 2 << 20},
 				{ID: "cur-2", Title: "composerData keys", CWD: "/Users/stcrawfo/Development/javascript/agent-sweeper", Label: "/Users/stcrawfo/Development/javascript/agent-sweeper", LastActivity: ago(8 * day), SizeBytes: 14 << 20},
-				{ID: "cur-3", Title: "transcripts walk", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(70 * day), SizeBytes: 3 << 20, Active: true},
+				{ID: "cur-3", Title: "transcripts walk", CWD: "/Users/stcrawfo/Development/javascript/omnivue", Label: "/Users/stcrawfo/Development/javascript/omnivue", LastActivity: ago(70 * day), SizeBytes: 3 << 20},
 			},
 		},
 	}
