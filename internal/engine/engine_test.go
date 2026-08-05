@@ -11,36 +11,22 @@ import (
 	"time"
 
 	"github.com/stevencrawford/agent-sweeper/internal/model"
+	"github.com/stevencrawford/agent-sweeper/internal/testutil"
 )
 
 // newDB creates a temp SQLite file with schema executed and returns its path.
+// The store lives under the shared fixture root (testutil.StoreRoot), so a plan
+// built from it can only ever target throwaway fixtures — never a real agent
+// store (ticket 12 seam).
 func newDB(t *testing.T, schema string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "store.db")
-	db, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("seed schema: %v", err)
-	}
-	return path
+	return testutil.SeedDB(t, testutil.StoreRoot(t), "store.db", schema)
 }
 
 // countRows returns how many rows a query over path returns.
 func countRows(t *testing.T, path, query string) int {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var n int
-	if err := db.QueryRow(query).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	return n
+	return testutil.CountRows(t, path, query)
 }
 
 // writeFile writes data to path, failing the test on error.
@@ -54,11 +40,7 @@ func writeFile(t *testing.T, path string, data []byte) {
 // readFile returns the contents of path, failing the test on error.
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
+	return testutil.ReadFile(t, path)
 }
 
 func TestSQLDeleteCascadesInOneTxn(t *testing.T) {
