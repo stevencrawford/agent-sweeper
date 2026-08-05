@@ -17,7 +17,7 @@ func Agents() []model.Agent {
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
 	day := 24 * time.Hour
 
-	return []model.Agent{
+	agents := []model.Agent{
 		{
 			Name:     "OpenCode",
 			DataRoot: "~/.local/share/opencode",
@@ -76,4 +76,37 @@ func Agents() []model.Agent {
 			},
 		},
 	}
+
+	// Split each session's footprint into the reclaimable (plan Remove* bytes)
+	// and the raw detection-time size, and mark which agents delete SQLite/KV
+	// rows. File-based agents (Claude, Pi) reclaim what they measure; agents
+	// backed by large shared DBs (OpenCode, Copilot, Codex, Cursor) reclaim
+	// only the filesystem artifacts — the DB file bulk is freed by VACUUM,
+	// not by row deletion, so it is never counted as reclaim.
+	reclaimRatio := map[string]float64{
+		"OpenCode":    0.3,
+		"Copilot":     0.9,
+		"Claude Code": 1.0,
+		"Codex":       0.8,
+		"Pi":          1.0,
+		"Cursor":      0.5,
+	}
+	touchesStore := map[string]bool{
+		"OpenCode":    true,
+		"Copilot":     true,
+		"Claude Code": false,
+		"Codex":       true,
+		"Pi":          false,
+		"Cursor":      true,
+	}
+	for i := range agents {
+		ratio := reclaimRatio[agents[i].Name]
+		store := touchesStore[agents[i].Name]
+		for j := range agents[i].Sessions {
+			s := &agents[i].Sessions[j]
+			s.ReclaimBytes = int64(float64(s.SizeBytes) * ratio)
+			s.TouchesStore = store
+		}
+	}
+	return agents
 }

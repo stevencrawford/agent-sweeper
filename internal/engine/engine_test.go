@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stevencrawford/agent-sweeper/internal/model"
 )
 
 // newDB creates a temp SQLite file with schema executed and returns its path.
@@ -318,6 +320,19 @@ INSERT INTO ItemTable VALUES ('composer.composerData', '{"allComposers":[{"id":"
 	}
 	if doc["other"] != "x" {
 		t.Fatalf("unrelated field lost: other = %v, want x", doc["other"])
+	}
+}
+
+func TestSessionReclaimAndStoreSeam(t *testing.T) {
+	s := model.Session{SizeBytes: 1 << 20, ReclaimBytes: 300 << 10, TouchesStore: true}
+	if got, want := SessionReclaim(s), int64(300<<10); got != want {
+		t.Fatalf("SessionReclaim = %d, want %d", got, want)
+	}
+	if !SessionTouchesStore(s) {
+		t.Fatal("SessionTouchesStore = false, want true")
+	}
+	if SessionTouchesStore(model.Session{}) {
+		t.Fatal("SessionTouchesStore = true for empty session, want false")
 	}
 }
 

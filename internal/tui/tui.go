@@ -12,7 +12,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/stevencrawford/agent-sweeper/internal/engine"
 	"github.com/stevencrawford/agent-sweeper/internal/model"
+	"github.com/stevencrawford/agent-sweeper/internal/units"
 )
 
 type screen int
@@ -309,7 +311,7 @@ func (m *Model) computeMatches() {
 				continue
 			}
 			matches = append(matches, s)
-			reclaim += s.SizeBytes
+			reclaim += engine.SessionReclaim(s)
 		}
 	}
 	m.matches = matches
@@ -321,7 +323,7 @@ func (m *Model) viewAgent() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("agent-sweeper · pick an agent to sweep"))
 	for i, a := range m.agents {
-		line := fmt.Sprintf("%-12s  %3d sessions  %10s", a.Name, a.SessionCount(), humanBytes(a.Footprint()))
+		line := fmt.Sprintf("%-12s  %3d sessions  %10s", a.Name, a.SessionCount(), units.Bytes(a.Footprint()))
 		if i == m.cursor {
 			b.WriteString("\n" + selStyle.Render("▸ "+line))
 		} else {
@@ -367,7 +369,7 @@ func (m *Model) viewDir() string {
 		if label == "" {
 			label = "(no directory)"
 		}
-		line := fmt.Sprintf("[%s] %-58s %3d sessions %10s", mark, label, g.GroupCount(), humanBytes(groupBytes(g)))
+		line := fmt.Sprintf("[%s] %-58s %3d sessions %10s", mark, label, g.GroupCount(), units.Bytes(groupBytes(g)))
 		if i == m.cursor {
 			b.WriteString("\n" + selStyle.Render("▸ "+line))
 		} else {
@@ -390,7 +392,7 @@ func (m *Model) viewBranch() string {
 		if m.selected[i] {
 			mark = "●"
 		}
-		line := fmt.Sprintf("[%s] %-38s %-24s %3d sessions %10s", mark, shortRepo(bg.Repo), bg.Branch, bg.GroupCount(), humanBytes(branchGroupBytes(bg)))
+		line := fmt.Sprintf("[%s] %-38s %-24s %3d sessions %10s", mark, shortRepo(bg.Repo), bg.Branch, bg.GroupCount(), units.Bytes(branchGroupBytes(bg)))
 		if i == m.cursor {
 			b.WriteString("\n" + selStyle.Render("▸ "+line))
 		} else {
@@ -440,11 +442,11 @@ func (m *Model) viewDryRun() string {
 			if m.mode == modeGit && s.Branch != "" {
 				extra = " " + dimStyle.Render(s.Branch)
 			}
-			fmt.Fprintf(&b, "\n   %-42s %-10s %9s%s", s.Title, s.ID, humanBytes(s.SizeBytes), extra)
+			fmt.Fprintf(&b, "\n   %-42s %-10s %9s%s", s.Title, s.ID, units.Bytes(engine.SessionReclaim(s)), extra)
 		}
 	}
 	b.WriteString("\n\n" + warnStyle.Render(fmt.Sprintf(
-		"would delete %d sessions, reclaiming %s", len(m.matches), humanBytes(m.reclaimBytes))))
+		"would delete %d sessions, reclaiming %s", len(m.matches), units.Bytes(m.reclaimBytes))))
 	if m.protected > 0 {
 		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%d active sessions are protected and never swept", m.protected)))
 	}
@@ -470,7 +472,7 @@ func (m *Model) viewConfirm() string {
 	agent := m.agents[m.agentIdx]
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("confirm"))
-	fmt.Fprintf(&b, "\nDelete %d sessions from %s, reclaiming %s?", len(m.matches), agent.Name, humanBytes(m.reclaimBytes))
+	fmt.Fprintf(&b, "\nDelete %d sessions from %s, reclaiming %s?", len(m.matches), agent.Name, units.Bytes(m.reclaimBytes))
 	b.WriteString("\n\n" + errStyle.Render("This cannot be undone. Active sessions are never touched."))
 	b.WriteString("\n\n" + hintStyle.Render("y confirm · n cancel"))
 	return b.String()
@@ -491,7 +493,7 @@ func (m *Model) viewAfter() string {
 	agent := m.agents[m.agentIdx]
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("sweep complete"))
-	fmt.Fprintf(&b, "\nReclaimed %s from %s across %d sessions.", humanBytes(m.reclaimBytes), agent.Name, len(m.matches))
+	fmt.Fprintf(&b, "\nReclaimed %s from %s across %d sessions.", units.Bytes(m.reclaimBytes), agent.Name, len(m.matches))
 	b.WriteString("\n\n" + hintStyle.Render("enter quit"))
 	return b.String()
 }
@@ -501,7 +503,7 @@ func (m *Model) viewAfter() string {
 func groupBytes(g model.Group) int64 {
 	var total int64
 	for _, s := range g.Sessions {
-		total += s.SizeBytes
+		total += engine.SessionReclaim(s)
 	}
 	return total
 }
@@ -509,7 +511,7 @@ func groupBytes(g model.Group) int64 {
 func branchGroupBytes(bg model.BranchGroup) int64 {
 	var total int64
 	for _, s := range bg.Sessions {
-		total += s.SizeBytes
+		total += engine.SessionReclaim(s)
 	}
 	return total
 }
@@ -525,19 +527,6 @@ func shortRepo(repo string) string {
 		}
 	}
 	return repo
-}
-
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%dB", n)
-	}
-	div, exp := int64(unit), 0
-	for k := n / unit; k >= unit; k /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func progressBar(p float64, width int) string {

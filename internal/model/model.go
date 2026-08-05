@@ -16,7 +16,7 @@ type Agent struct {
 }
 
 // Session is a single sweepable session: a working directory it ran in, its
-// last activity, the bytes its artifacts occupy, and whether it is currently
+// last activity, the bytes its deletion reclaims, and whether it is currently
 // open (and therefore protected).
 type Session struct {
 	ID           string
@@ -26,8 +26,23 @@ type Session struct {
 	Repo         string // git repository identity when known (git-repo mode)
 	Branch       string // branch at session time (git-repo mode)
 	LastActivity time.Time
-	SizeBytes    int64
-	Active       bool
+	// SizeBytes is the detection-time raw size across the session's stores.
+	// It is never displayed directly; the reclaim footprint shown everywhere
+	// is ReclaimBytes (see engine.SessionReclaim), which counts only the
+	// filesystem bytes the session's deletion plan removes.
+	SizeBytes int64
+	// ReclaimBytes is the plan-based footprint: Remove* artifact bytes this
+	// session's sweep reclaims. It is the number stats and the sweep dry-run
+	// both report. Kept separate from SizeBytes so DB-row bulk (which SQLite
+	// only frees after VACUUM) is never mistaken for reclaim.
+	ReclaimBytes int64
+	// TouchesStore reports whether deleting this session removes SQLite rows
+	// or KV entries, whose file size is unchanged until VACUUM. Surfaced by
+	// stats as the store-row count.
+	TouchesStore bool
+	// Active is true when the session is currently open; such sessions are
+	// protected and never swept.
+	Active bool
 }
 
 // Group buckets sessions by their canonical cwd. A zero Path is the
@@ -50,11 +65,12 @@ func (a *Agent) SessionCount() int {
 	return len(a.Sessions)
 }
 
-// Footprint returns the total bytes across all of the agent's sessions.
+// Footprint returns the total reclaimable bytes across all of the agent's
+// sessions — the same plan-based number stats and the sweep dry-run report.
 func (a *Agent) Footprint() int64 {
 	var total int64
 	for _, s := range a.Sessions {
-		total += s.SizeBytes
+		total += s.ReclaimBytes
 	}
 	return total
 }

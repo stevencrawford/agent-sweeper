@@ -1,20 +1,10 @@
-// Command agent-sweeper is a prototype stub of the interactive sweep flow.
+// Command agent-sweeper cleans stale AI coding-agent session stores.
 package main
 
 import (
-	"fmt"
-	"os"
-
-	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/stevencrawford/agent-sweeper/internal/mock"
-	"github.com/stevencrawford/agent-sweeper/internal/tui"
+	"github.com/stevencrawford/agent-sweeper/cmd"
 )
 
 func main() {
-	p := tea.NewProgram(tui.New(mock.Agents()), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "agent-sweeper:", err)
-		os.Exit(1)
-	}
+	cmd.Execute()
 }

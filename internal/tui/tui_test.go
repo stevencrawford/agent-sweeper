@@ -91,9 +91,9 @@ func TestFlowReachesAfterReport(t *testing.T) {
 
 func TestGitModeReachesDryRunWithBranches(t *testing.T) {
 	m := New(mock.Agents())
-	m = press(t, m, "enter")     // -> mode picker
-	m = press(t, m, "down")      // git repository
-	m = press(t, m, "enter")     // -> branch picker
+	m = press(t, m, "enter") // -> mode picker
+	m = press(t, m, "down")  // git repository
+	m = press(t, m, "enter") // -> branch picker
 	if m.screen != screenBranch {
 		t.Fatalf("after mode enter, want branch picker, got screen %d", m.screen)
 	}

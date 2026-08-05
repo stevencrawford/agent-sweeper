@@ -26,6 +26,7 @@ A working, distributed Go CLI — `agent-sweeper` — that interactively detects
 - [Age enum and matching semantics](issues/06-age-enum-and-semantics.md) — enum `1d/3d/7d/30d/90d/1y/all`, no custom value; strictly older-than-X match; per-store last-activity reads (opencode MAX time_updated/time_created, copilot sessions.updated_at bumped by events mtime, mtime for claude/codex/pi, cursor lastUpdatedAt); unreadable → fall back to created, else treat as oldest.
 - [TUI flow and screens](issues/07-tui-flow-and-screens.md) — 7-screen flow (agent → grouping-mode → dir/branch picker → age → dry-run → confirm → progress → after) as a runnable bubbletea stub (`go run .`); dry-run lists only deletable rows; human review added a git-repo grouping mode with branch multi-select (feeds 13). Prototype: `main.go`, `internal/{model,mock,tui}/`.
 - [Deletion semantics design](issues/08-deletion-semantics-design.md) — engine executes per-session plans: files-first-record-last (stop on first error → interrupted sweeps leave self-healing ghosts), continue-and-report, dry-run=plan (reclaim invariant), no auto-VACUUM (NeedsVacuum hint), shared stores (snapshot/, composer.content.*) excluded. One BEGIN IMMEDIATE txn per session-store with FK=ON + busy retry; all actions idempotent. Prototype: `internal/engine/` (modernc.org/sqlite), per-agent ordered plan table in the ticket.
+- [stats command data model](issues/09-stats-data-model.md) — `agent-sweeper stats` is a one-shot Cobra table `AGENT | SESSIONS | RECLAIMABLE | STORE-ROW` + TOTAL; footprint is plan-based (`engine.SessionReclaim` = Remove\* bytes, DB bulk counts 0) shared with the sweep dry-run via the same seam; `model.Session.ReclaimBytes`/`TouchesStore` distinct from raw `SizeBytes`; `cmd/` package with `sweep`/`stats` subcommands (Cobra, mirrors omnivue). Code: `internal/stats/`, `internal/units/`, `internal/engine/reclaim.go`.
 
 ## Not yet specified
 
@@ -35,7 +36,6 @@ A working, distributed Go CLI — `agent-sweeper` — that interactively detects
 - Windows installer / winget / scoop.
 - Behavior when every matching session is protected or active.
 - Shared-store reclaim: OpenCode project-wide `git gc --prune=7.days` on `snapshot/<project-id>/` after a project's last session is deleted, and Cursor content-addressed `composer.content.*` reference-counting — both excluded from per-session plans by 08; gated deep-reclaim decision deferred until the sweep is wired to real detection.
-- Footprint semantics for DB-row sessions: 08's reclaim counts filesystem bytes only; the dry-run's per-session sizes must come from the plan (Remove* action bytes), not detection-time DB sizes, or reclaim overstates (feeds 09).
 
 ## Out of scope
 
