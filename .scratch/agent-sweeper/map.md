@@ -28,12 +28,12 @@ A working, distributed Go CLI — `agent-sweeper` — that interactively detects
 - [Deletion semantics design](issues/08-deletion-semantics-design.md) — engine executes per-session plans: files-first-record-last (stop on first error → interrupted sweeps leave self-healing ghosts), continue-and-report, dry-run=plan (reclaim invariant), no auto-VACUUM (NeedsVacuum hint), shared stores (snapshot/, composer.content.*) excluded. One BEGIN IMMEDIATE txn per session-store with FK=ON + busy retry; all actions idempotent. Prototype: `internal/engine/` (modernc.org/sqlite), per-agent ordered plan table in the ticket.
 - [stats command data model](issues/09-stats-data-model.md) — `agent-sweeper stats` is a one-shot Cobra table `AGENT | SESSIONS | RECLAIMABLE | STORE-ROW` + TOTAL; footprint is plan-based (`engine.SessionReclaim` = Remove\* bytes, DB bulk counts 0) shared with the sweep dry-run via the same seam; `model.Session.ReclaimBytes`/`TouchesStore` distinct from raw `SizeBytes`; `cmd/` package with `sweep`/`stats` subcommands (Cobra, mirrors omnivue). Code: `internal/stats/`, `internal/units/`, `internal/engine/reclaim.go`.
 - [Active-session protection wiring](issues/10-active-session-protection-wiring.md) — real detector (`internal/protect/`): `ps` scan + per-agent resume-argv parsing + durable markers (Copilot `inuse.*.lock` w/ PID validation, Claude roster/jobs, Cursor focus gated on a running process); 24h grace window is a hard protection rule; computed at load, re-validated at confirm with a fresh scan; dry-run lists protected rows dimmed with reason; 0 matches blocks the confirm. Code: `internal/protect/`, `internal/tui/`, `cmd/sweep.go`.
+- [Release and CI pipeline](issues/11-release-and-ci-pipeline.md) — shipped v0.1.0; tagpr + goreleaser mirrors omnivue; repo `stevencrawford/agent-sweeper` (public) + tap `stevencrawford/homebrew-tap` (public); CI on ubuntu/macos; `brew install stevencrawford/tap/agent-sweeper` verified end-to-end. Facts: repo/tap/release URLs in the ticket.
 
 ## Not yet specified
 
 - Scriptable/non-interactive mode (`--agent`, `--repo`, `--age`, `--yes`) — a likely later want; the flow is interactive-only for now.
 - Config file to pin/exclude specific sessions from ever being swept (declined as a safety mechanism, may return as a power-user feature).
-- Homebrew formula and tap details (tangled up in the release ticket).
 - Windows installer / winget / scoop.
 - Shared-store reclaim: OpenCode project-wide `git gc --prune=7.days` on `snapshot/<project-id>/` after a project's last session is deleted, and Cursor content-addressed `composer.content.*` reference-counting — both excluded from per-session plans by 08; gated deep-reclaim decision deferred until the sweep is wired to real detection.
 
