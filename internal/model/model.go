@@ -13,6 +13,10 @@ type Agent struct {
 	Name     string
 	DataRoot string
 	Sessions []Session
+	// Found is false when the agent's data root could not be resolved to an
+	// existing store, so a caller can distinguish "not installed or missing"
+	// from "installed but no sessions".
+	Found bool
 }
 
 // Session is a single sweepable session: a working directory it ran in, its

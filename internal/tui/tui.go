@@ -5,6 +5,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/stevencrawford/agent-sweeper/internal/engine"
+	"github.com/stevencrawford/agent-sweeper/internal/inventory"
 	"github.com/stevencrawford/agent-sweeper/internal/model"
 	"github.com/stevencrawford/agent-sweeper/internal/protect"
 	"github.com/stevencrawford/agent-sweeper/internal/units"
@@ -72,6 +74,11 @@ type Model struct {
 	reclaimBytes int64
 	protected    int
 
+	// offset is the first row of the current windowing view: the visible slice
+	// of a long picker list or dry-run report. It advances with the cursor on
+	// selection screens and directly with PgUp/PgDn on the paged report.
+	offset int
+
 	// protector marks which sessions are currently open. It is run once at
 	// load to seed the pickers (via NewWithProtection) and again at confirm,
 	// so deletion never touches a session that became active after the
@@ -83,6 +90,15 @@ type Model struct {
 
 	progress float64
 	done     bool
+
+	// plans binds each detected session to its ordered deletion plan, the same
+	// plan whose remove bytes produced the dry-run footprint. At confirm the
+	// matched sessions' plans are executed so dry-run==confirm holds on real
+	// data. Nil disables real execution (tests, --demo).
+	plans map[string]*engine.SessionPlan
+	// result is the engine outcome of the confirmed sweep, rendered on the
+	// after screen.
+	result *engine.Result
 }
 
 // New builds the sweep TUI over the given agents.
@@ -95,11 +111,43 @@ func New(agents []model.Agent) *Model {
 }
 
 // NewWithProtection builds the TUI with a live protector, marking every
-// currently-open session Active before the first render.
-func NewWithProtection(agents []model.Agent, fn protect.Protector) *Model {
+// currently-open session Active before the first render. plans binds the
+// real detection plans (may be nil for a demo/test run).
+func NewWithProtection(agents []model.Agent, fn protect.Protector, plans map[string]*engine.SessionPlan) *Model {
 	m := New(agents)
+	m.plans = plans
 	m.ApplyActive(fn, time.Now())
 	return m
+}
+
+// fallbackHeight is the rendered row budget when no window size is known. In
+// inline mode a terminal height may not be delivered before the first paint,
+// so lists must not render unbounded.
+const fallbackHeight = 20
+
+// viewportRows returns the number of list rows that fit in the current (or
+// fallback) viewport, reserving a few rows for the header and hint lines.
+func viewportRows(m *Model) int {
+	h := m.height
+	if h <= 0 {
+		h = fallbackHeight
+	}
+	rows := max(h-5, 3) // title + data-root + hints + summary
+	return rows
+}
+
+// windowFor returns the inclusive rows [lo, hi) of a list of count items whose
+// cursor is kept visible but static when count fits the viewport. This is what
+// makes long pickers scroll rather than overflow.
+func windowFor(cursor, count, rows int) (lo, hi int) {
+	if count <= rows {
+		return 0, count
+	}
+	lo = max(cursor-(rows/3), 0) // keep the cursor a third from the top
+	if lo+rows > count {
+		lo = count - rows
+	}
+	return lo, lo + rows
 }
 
 // ApplyActive marks in place every session the protector reports as open and
@@ -130,6 +178,12 @@ func (m *Model) Init() tea.Cmd {
 
 type progressMsg float64
 
+// sweepResult carries the engine outcome of a confirmed sweep.
+type sweepResult struct {
+	plan *engine.Plan
+	res  *engine.Result
+}
+
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -145,6 +199,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.advanceProgress()
+	case sweepResult:
+		m.result = msg.res
+		m.done = true
+		m.screen = screenAfter
+		return m, nil
 	}
 	return m, nil
 }
@@ -177,10 +236,7 @@ func (m *Model) View() string {
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
-		if m.screen == screenAfter {
-			return m, tea.Quit
-		}
-		return m, nil
+		return m, tea.Quit
 	}
 
 	switch m.screen {
@@ -300,6 +356,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.screen = screenDryRun
+			m.offset = 0
 		case "esc":
 			if m.mode == modeGit {
 				m.screen = screenBranch
@@ -313,15 +370,26 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenConfirm
 		case "esc":
 			m.screen = screenAge
+		case "pgup", "up", "k":
+			if m.offset > 0 {
+				m.offset -= max(1, viewportRows(m)-4)
+				if m.offset < 0 {
+					m.offset = 0
+				}
+			}
+		case "pgdown", "down", "j":
+			// The window clamps itself on render; just nudge forward so the
+			// hint reflects that more content is reachable.
+			m.offset += max(1, viewportRows(m)-4)
 		}
 	case screenConfirm:
 		switch msg.String() {
 		case "y", "Y":
+			agent := m.agents[m.agentIdx]
 			if m.protector != nil {
 				// Decision 10: re-validate protection against a fresh scan
 				// immediately before deleting — a session opened since the
 				// dry-run must never be swept.
-				agent := m.agents[m.agentIdx]
 				fresh := m.protector(agent, time.Now())
 				kept := m.matches[:0]
 				var reclaim int64
@@ -340,10 +408,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
+			plan := m.buildPlan(agent)
+			if plan == nil {
+				m.err = errStyle.Render("no deletion plans are available for this run (demo/test data has none)")
+				m.screen = screenDryRun
+				return m, nil
+			}
 			m.screen = screenProgress
 			m.progress = 0
 			m.done = false
-			return m, m.advanceProgress()
+			return m, m.runSweep(plan)
 		case "n", "N", "esc":
 			m.screen = screenDryRun
 		}
@@ -369,6 +443,34 @@ func (m *Model) advanceProgress() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg {
 		return progressMsg(next)
 	})
+}
+
+// buildPlan assembles the ordered deletion plan from the confirmed-still-safe
+// matches, using the same plans that produced the dry-run footprint, so a
+// confirmed sweep reclaims exactly what the dry-run reported. It returns nil
+// when no plans are available (demo/test) or nothing matched.
+func (m *Model) buildPlan(agent model.Agent) *engine.Plan {
+	if len(m.plans) == 0 || len(m.matches) == 0 {
+		return nil
+	}
+	plan := &engine.Plan{}
+	for _, s := range m.matches {
+		if p := m.plans[inventory.PlanKey(agent.Name, s.ID)]; p != nil {
+			plan.Sessions = append(plan.Sessions, p)
+		}
+	}
+	if len(plan.Sessions) == 0 {
+		return nil
+	}
+	return plan
+}
+
+// runSweep executes the plan off the UI thread and reports the outcome.
+func (m *Model) runSweep(plan *engine.Plan) tea.Cmd {
+	return func() tea.Msg {
+		res := engine.Execute(context.Background(), plan)
+		return sweepResult{plan: plan, res: res}
+	}
 }
 
 // computeMatches applies the age bucket and protection to the selected
@@ -406,7 +508,9 @@ func (m *Model) computeMatches() {
 func (m *Model) viewAgent() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("agent-sweeper · pick an agent to sweep"))
-	for i, a := range m.agents {
+	lo, hi := windowFor(m.cursor, len(m.agents), viewportRows(m))
+	for i := lo; i < hi; i++ {
+		a := m.agents[i]
 		line := fmt.Sprintf("%-12s  %3d sessions  %10s", a.Name, a.SessionCount(), units.Bytes(a.Footprint()))
 		if i == m.cursor {
 			b.WriteString("\n" + selStyle.Render("▸ "+line))
@@ -414,6 +518,7 @@ func (m *Model) viewAgent() string {
 			b.WriteString("\n" + rowStyle.Render("  "+line))
 		}
 	}
+	b.WriteString(scrollHint(lo, hi, len(m.agents)))
 	b.WriteString("\n\n" + hintStyle.Render("↑/↓ move · enter select · q quit"))
 	return b.String()
 }
@@ -444,7 +549,9 @@ func (m *Model) viewDir() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(fmt.Sprintf("sweep %s · choose directories", agent.Name)))
 	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("data root: %s", agent.DataRoot)))
-	for i, g := range m.groups {
+	lo, hi := windowFor(m.cursor, len(m.groups), viewportRows(m))
+	for i := lo; i < hi; i++ {
+		g := m.groups[i]
 		mark := " "
 		if m.selected[i] {
 			mark = "●"
@@ -460,6 +567,7 @@ func (m *Model) viewDir() string {
 			b.WriteString("\n" + rowStyle.Render("  "+line))
 		}
 	}
+	b.WriteString(scrollHint(lo, hi, len(m.groups)))
 	if m.err != "" {
 		b.WriteString("\n\n" + m.err)
 	}
@@ -467,11 +575,29 @@ func (m *Model) viewDir() string {
 	return b.String()
 }
 
+// scrollHint emits a trim indicator when the list is scrolled at the top,
+// bottom, or mid-window so long pickers read as paged.
+func scrollHint(lo, hi, count int) string {
+	if count <= hi-lo {
+		return ""
+	}
+	var parts []string
+	if lo > 0 {
+		parts = append(parts, "▲")
+	}
+	if hi < count {
+		parts = append(parts, "▼")
+	}
+	return "\n" + dimStyle.Render("‥ "+strings.Join(parts, " ")+" scroll")
+}
+
 func (m *Model) viewBranch() string {
 	agent := m.agents[m.agentIdx]
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(fmt.Sprintf("sweep %s · choose branches", agent.Name)))
-	for i, bg := range m.branches {
+	lo, hi := windowFor(m.cursor, len(m.branches), viewportRows(m))
+	for i := lo; i < hi; i++ {
+		bg := m.branches[i]
 		mark := " "
 		if m.selected[i] {
 			mark = "●"
@@ -483,6 +609,7 @@ func (m *Model) viewBranch() string {
 			b.WriteString("\n" + rowStyle.Render("  "+line))
 		}
 	}
+	b.WriteString(scrollHint(lo, hi, len(m.branches)))
 	if m.err != "" {
 		b.WriteString("\n\n" + m.err)
 	}
@@ -518,13 +645,17 @@ func (m *Model) viewDryRun() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(fmt.Sprintf("dry run · %s · older than %s", agent.Name, age.Label)))
 	b.WriteString("\n" + dimStyle.Render("nothing is deleted until you confirm"))
+
+	// Build the report into rows so a long session list pages instead of
+	// overflowing the inline viewport.
+	var rows []string
 	for idx := range m.selected {
 		label, sessions := groupLabel(m, idx)
-		b.WriteString("\n\n" + okStyle.Render("▣ "+label) + dimStyle.Render(fmt.Sprintf("  %d sessions", len(sessions))))
+		rows = append(rows, okStyle.Render("▣ "+label)+dimStyle.Render(fmt.Sprintf("  %d sessions", len(sessions))))
 		for _, s := range sessions {
 			reason, protected := m.active[s.ID]
 			if protected {
-				fmt.Fprintf(&b, "\n   %-42s %-10s %s", dimStyle.Render(s.Title), dimStyle.Render("protected"), dimStyle.Render(protect.ReasonText(reason)))
+				rows = append(rows, fmt.Sprintf("   %-42s %-10s %s", dimStyle.Render(s.Title), dimStyle.Render("protected"), dimStyle.Render(protect.ReasonText(reason))))
 				continue
 			}
 			if !age.Matches(s.LastActivity) {
@@ -534,9 +665,14 @@ func (m *Model) viewDryRun() string {
 			if m.mode == modeGit && s.Branch != "" {
 				extra = " " + dimStyle.Render(s.Branch)
 			}
-			fmt.Fprintf(&b, "\n   %-42s %-10s %9s%s", s.Title, s.ID, units.Bytes(engine.SessionReclaim(s)), extra)
+			rows = append(rows, fmt.Sprintf("   %-42s %-10s %9s%s", s.Title, s.ID, units.Bytes(engine.SessionReclaim(s)), extra))
 		}
 	}
+	lo, hi := windowFor(m.offset, len(rows), viewportRows(m))
+	for i := lo; i < hi; i++ {
+		b.WriteString("\n" + rows[i])
+	}
+	b.WriteString(scrollHint(lo, hi, len(rows)))
 	b.WriteString("\n\n" + warnStyle.Render(fmt.Sprintf(
 		"would delete %d sessions, reclaiming %s", len(m.matches), units.Bytes(m.reclaimBytes))))
 	if m.protected > 0 {
@@ -545,7 +681,7 @@ func (m *Model) viewDryRun() string {
 	if m.err != "" {
 		b.WriteString("\n\n" + m.err)
 	} else {
-		b.WriteString("\n\n" + hintStyle.Render("enter continue · esc back"))
+		b.WriteString("\n\n" + hintStyle.Render("enter continue · esc back · ↑/↓ pgup/pgdn scroll"))
 	}
 	return b.String()
 }
@@ -589,7 +725,18 @@ func (m *Model) viewAfter() string {
 	agent := m.agents[m.agentIdx]
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("sweep complete"))
-	fmt.Fprintf(&b, "\nReclaimed %s from %s across %d sessions.", units.Bytes(m.reclaimBytes), agent.Name, len(m.matches))
+	if m.result != nil {
+		fmt.Fprintf(&b, "\n%s", okStyle.Render(fmt.Sprintf(
+			"deleted %d sessions, reclaimed %s", m.result.Deleted(), units.Bytes(m.result.BytesReclaimed()))))
+		if n := m.result.Failed(); n > 0 {
+			fmt.Fprintf(&b, "\n%s", warnStyle.Render(fmt.Sprintf("%d sessions failed and were left for a re-run", n)))
+		}
+		if m.result.NeedsVacuum() {
+			fmt.Fprintf(&b, "\n%s", warnStyle.Render("store rows were deleted — the SQLite file only shrinks after a VACUUM"))
+		}
+	} else {
+		fmt.Fprintf(&b, "\nReclaimed %s from %s across %d sessions.", units.Bytes(m.reclaimBytes), agent.Name, len(m.matches))
+	}
 	b.WriteString("\n\n" + hintStyle.Render("enter quit"))
 	return b.String()
 }

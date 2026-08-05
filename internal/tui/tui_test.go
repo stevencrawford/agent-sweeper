@@ -7,10 +7,29 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/stevencrawford/agent-sweeper/internal/engine"
+	"github.com/stevencrawford/agent-sweeper/internal/inventory"
 	"github.com/stevencrawford/agent-sweeper/internal/mock"
 	"github.com/stevencrawford/agent-sweeper/internal/model"
 	"github.com/stevencrawford/agent-sweeper/internal/protect"
 )
+
+// mockPlans returns an empty-action plan for every mock session so the confirm
+// step has a plan to execute when tests press "y".
+func mockPlans() map[string]*engine.SessionPlan {
+	plans := map[string]*engine.SessionPlan{}
+	for _, a := range mock.Agents() {
+		for _, s := range a.Sessions {
+			plans[inventory.PlanKey(a.Name, s.ID)] = &engine.SessionPlan{
+				ID:      s.ID,
+				Agent:   a.Name,
+				Title:   s.Title,
+				Actions: []engine.Action{},
+			}
+		}
+	}
+	return plans
+}
 
 func press(t *testing.T, m *Model, keys ...string) *Model {
 	t.Helper()
@@ -31,6 +50,10 @@ func keyType(s string) tea.KeyType {
 		return tea.KeyUp
 	case "down", "j":
 		return tea.KeyDown
+	case "pgup":
+		return tea.KeyPgUp
+	case "pgdown":
+		return tea.KeyPgDown
 	case " ":
 		return tea.KeySpace
 	case "enter":
@@ -42,7 +65,7 @@ func keyType(s string) tea.KeyType {
 }
 
 func TestFlowReachesAfterReport(t *testing.T) {
-	m := New(mock.Agents())
+	m := NewWithProtection(mock.Agents(), nil, mockPlans())
 	m = press(t, m, "enter") // agent picker -> mode picker (OpenCode selected)
 	if m.screen != screenMode {
 		t.Fatalf("after agent enter, want mode picker, got screen %d", m.screen)
@@ -154,9 +177,9 @@ func TestGitModeExcludesNoRepoSessions(t *testing.T) {
 // check the pivot target for a following directory choice.
 func pivotFromGitMode(t *testing.T) *Model {
 	m := New(mock.Agents())
-	m = press(t, m, "enter")        // -> mode picker
-	m = press(t, m, "down")         // git
-	m = press(t, m, "enter")        // -> branch picker
+	m = press(t, m, "enter")                       // -> mode picker
+	m = press(t, m, "down")                        // git
+	m = press(t, m, "enter")                       // -> branch picker
 	m = press(t, m, "down", "down", "down", "esc") // walk branches, then esc back
 	return m
 }
@@ -213,10 +236,10 @@ func TestEscNavigatesBack(t *testing.T) {
 // the dry run.
 func toDryRun(t *testing.T, m *Model) *Model {
 	t.Helper()
-	m = press(t, m, "enter")          // agent -> mode
-	m = press(t, m, "enter")          // directory mode -> dir picker
-	m = press(t, m, " ", "enter")     // select first directory -> age picker
-	m = press(t, m, "enter")          // age 1d -> dry run
+	m = press(t, m, "enter")      // agent -> mode
+	m = press(t, m, "enter")      // directory mode -> dir picker
+	m = press(t, m, " ", "enter") // select first directory -> age picker
+	m = press(t, m, "enter")      // age 1d -> dry run
 	return m
 }
 
@@ -227,7 +250,7 @@ func TestProtectedSessionExcludedAndListed(t *testing.T) {
 		}
 		return protect.Report{}
 	}
-	m := NewWithProtection(mock.Agents(), stub)
+	m := NewWithProtection(mock.Agents(), stub, mockPlans())
 	m = toDryRun(t, m)
 
 	if m.screen != screenDryRun {
@@ -261,7 +284,7 @@ func TestNothingToDeleteBlocksConfirm(t *testing.T) {
 		}
 		return rep
 	}
-	m := NewWithProtection(mock.Agents(), stub)
+	m := NewWithProtection(mock.Agents(), stub, mockPlans())
 	m = press(t, m, "enter")      // agent -> mode
 	m = press(t, m, "enter")      // directory mode -> dir picker
 	m = press(t, m, " ", "enter") // select first directory -> age picker
@@ -285,7 +308,7 @@ func TestConfirmRevalidatesProtection(t *testing.T) {
 		}
 		return protect.Report{}
 	}
-	m := NewWithProtection(mock.Agents(), stub)
+	m := NewWithProtection(mock.Agents(), stub, mockPlans())
 	m = toDryRun(t, m)
 	if len(m.matches) != 2 {
 		t.Fatalf("before confirm both oc-0001 and oc-0002 should match, got %d", len(m.matches))
@@ -314,7 +337,7 @@ func TestConfirmBlocksWhenEverythingRevalidatedActive(t *testing.T) {
 		}
 		return protect.Report{}
 	}
-	m := NewWithProtection(mock.Agents(), stub)
+	m := NewWithProtection(mock.Agents(), stub, mockPlans())
 	m = toDryRun(t, m)
 	m = press(t, m, "enter", "y")
 	if m.screen != screenDryRun {
@@ -322,5 +345,56 @@ func TestConfirmBlocksWhenEverythingRevalidatedActive(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "now active") {
 		t.Fatalf("dry run should explain the block, got:\n%s", m.View())
+	}
+}
+
+func TestWindowForClampsAndKeepsCursorVisible(t *testing.T) {
+	cases := []struct {
+		cursor, count, rows int
+		wantLo              int
+	}{
+		{cursor: 0, count: 3, rows: 10, wantLo: 0},     // fits: no scroll
+		{cursor: 0, count: 50, rows: 10, wantLo: 0},    // at top
+		{cursor: 49, count: 50, rows: 10, wantLo: 40},  // at bottom
+		{cursor: 15, count: 50, rows: 10, wantLo: 12},  // mid-window
+		{cursor: 100, count: 50, rows: 10, wantLo: 40}, // cursor clamped past end
+	}
+	for _, tc := range cases {
+		lo, hi := windowFor(tc.cursor, tc.count, tc.rows)
+		if lo != tc.wantLo {
+			t.Errorf("windowFor(%d,%d,%d) = [%d,%d), want lo=%d", tc.cursor, tc.count, tc.rows, lo, hi, tc.wantLo)
+		}
+		if hi-lo > tc.rows {
+			t.Errorf("windowFor(%d,%d,%d) overflows viewport: [%d,%d)", tc.cursor, tc.count, tc.rows, lo, hi)
+		}
+	}
+}
+
+func TestScrollHintOnlyWhenScrolled(t *testing.T) {
+	if got := scrollHint(0, 5, 5); got != "" {
+		t.Fatalf("fully-visible list should have no hint, got %q", got)
+	}
+	got := scrollHint(0, 5, 20)
+	if !strings.Contains(got, "scroll") || !strings.Contains(got, "▼") {
+		t.Fatalf("clipped list should hint downward scroll, got %q", got)
+	}
+	got = scrollHint(15, 20, 20)
+	if !strings.Contains(got, "▲") {
+		t.Fatalf("top-clipped list should hint upward scroll, got %q", got)
+	}
+}
+
+func TestDryRunPagingMovesOffset(t *testing.T) {
+	m := New(mock.Agents())
+	m.height = 8
+	m = toDryRun(t, m)
+	before := m.offset
+	m = press(t, m, "pgdown")
+	if m.offset <= before {
+		t.Fatalf("pgdown on the dry-run must advance the offset, want >%d, got %d", before, m.offset)
+	}
+	m = press(t, m, "pgup")
+	if m.offset != 0 {
+		t.Fatalf("pgup should return to the top of the dry-run, got %d", m.offset)
 	}
 }
