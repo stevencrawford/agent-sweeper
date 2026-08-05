@@ -1,0 +1,46 @@
+name: build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  job-test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run lint
+        if: runner.os == 'Linux'
+        uses: reviewdog/action-golangci-lint@c76cceaaab89abe74e649d2e34c6c9adc26662d2 # v2.10.0
+        with:
+          fail_level: error
+          go_version_file: go.mod
+          cache: false
+
+      - name: Run gostyle
+        if: runner.os == 'Linux'
+        uses: k1LoW/gostyle-action@e1b847d37b3041c5fdb8b911bcf00b350779ca61 # v1.5.1
+        with:
+          config-file: .gostyle.yml
+
+      - name: Run tests
+        run: go test ./... -count=1

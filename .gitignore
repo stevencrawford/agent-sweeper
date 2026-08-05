@@ -3,3 +3,8 @@
 
 # Lock files
 *-lock.json
+
+# Build artifacts
+/agent-sweeper
+/dist/
+/coverage.out

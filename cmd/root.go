@@ -8,10 +8,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/stevencrawford/agent-sweeper/version"
 )
-
-// version is the CLI version, overridable at build time via -ldflags.
-var version = "dev"
 
 var rootCmd = &cobra.Command{
 	Use:   "agent-sweeper",
@@ -19,7 +17,7 @@ var rootCmd = &cobra.Command{
 	Long: `agent-sweeper detects the six major coding agents' local session stores,
 reports their filesystem footprint, and cleans stale sessions interactively.
 Actively-open sessions are never touched, and nothing is deleted without review.`,
-	Version: version,
+	Version: version.Version,
 }
 
 // Execute runs the CLI, exiting with status 1 on error.

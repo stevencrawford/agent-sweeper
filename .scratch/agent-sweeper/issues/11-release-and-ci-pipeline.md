@@ -3,6 +3,7 @@
 Type: task
 Status: open
 Blocked by:
+Assignee: stcrawfo (session)
 
 ## Question
 

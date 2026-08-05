@@ -1,0 +1,81 @@
+version: 2
+before:
+  hooks:
+    - go mod download
+    - go mod tidy
+builds:
+  -
+    id: agent-sweeper-darwin
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/stevencrawford/agent-sweeper/version.Revision={{.ShortCommit}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+  -
+    id: agent-sweeper-windows
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/stevencrawford/agent-sweeper/version.Revision={{.ShortCommit}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+  -
+    id: agent-sweeper-linux
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/stevencrawford/agent-sweeper/version.Revision={{.ShortCommit}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+archives:
+  -
+    id: agent-sweeper-archive
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}'
+    format_overrides:
+      - goos: darwin
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+checksum:
+  name_template: 'checksums.txt'
+changelog:
+  sort: asc
+  filters:
+    exclude:
+    - '^docs:'
+    - '^test:'
+nfpms:
+  -
+    id: agent-sweeper-nfpms
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}-1_{{ .Arch }}"
+    ids:
+      - agent-sweeper-linux
+    homepage: https://github.com/stevencrawford/agent-sweeper
+    maintainer: Steven Crawford
+    description: "agent-sweeper cleans stale AI coding-agent session stores"
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    epoch: 1
+release:
+  use_existing_draft: true
