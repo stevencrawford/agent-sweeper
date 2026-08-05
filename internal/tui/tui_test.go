@@ -117,6 +117,75 @@ func TestGitModeReachesDryRunWithBranches(t *testing.T) {
 	}
 }
 
+func TestGitModeExcludesNoRepoSessions(t *testing.T) {
+	// OpenCode's oc-0005 has no cwd/repo (see mock); it must never appear in
+	// git-repo mode, which only offers sessions that resolved to a repo (13).
+	agents := mock.Agents()
+	var oc []model.Session
+	for _, a := range agents {
+		if a.Name == "OpenCode" {
+			for _, s := range a.Sessions {
+				if s.Repo == "" {
+					oc = append(oc, s)
+				}
+			}
+		}
+	}
+	if len(oc) == 0 {
+		t.Fatal("fixture needs at least one no-repo session to exercise the filter")
+	}
+	m := New(agents)
+	for i := range m.agents {
+		if m.agents[i].Name == "OpenCode" {
+			m.agentIdx = i
+		}
+	}
+	m.branches = model.GroupByRepoBranch(onlyWithRepo(m.agents[m.agentIdx].Sessions))
+	for _, bg := range m.branches {
+		for _, s := range bg.Sessions {
+			if s.Repo == "" {
+				t.Fatalf("git mode must not offer a no-repo session, got %q in branch group %q", s.ID, bg.Repo)
+			}
+		}
+	}
+}
+
+// pivotFromGitMode drives into git mode, then escs back to the mode picker to
+// check the pivot target for a following directory choice.
+func pivotFromGitMode(t *testing.T) *Model {
+	m := New(mock.Agents())
+	m = press(t, m, "enter")        // -> mode picker
+	m = press(t, m, "down")         // git
+	m = press(t, m, "enter")        // -> branch picker
+	m = press(t, m, "down", "down", "down", "esc") // walk branches, then esc back
+	return m
+}
+
+func TestGitModeEscBackLandsOnModePicker(t *testing.T) {
+	m := pivotFromGitMode(t)
+	if m.screen != screenMode {
+		t.Fatalf("after esc from branch picker, want mode picker, got screen %d", m.screen)
+	}
+}
+
+func TestGitModeEscBackAllowsDirectoryPivot(t *testing.T) {
+	m := pivotFromGitMode(t)
+	// cursor must be back within the mode picker's range after esc, even when
+	// the branch list cursor had moved well past it.
+	if m.cursor != int(m.mode) {
+		t.Fatalf("after esc, mode cursor = %d, want %d (restored to current mode)", m.cursor, int(m.mode))
+	}
+	// "up" climbs to directory mode; enter lands on the directory picker.
+	m = press(t, m, "up")
+	if m.cursor != int(modeDir) {
+		t.Fatalf("up on the mode picker should select directory, got cursor %d", m.cursor)
+	}
+	m = press(t, m, "enter")
+	if m.screen != screenDir {
+		t.Fatalf("pivoting from git mode to directory mode should reach the dir picker, got screen %d", m.screen)
+	}
+}
+
 func TestDirPickerRequiresSelection(t *testing.T) {
 	m := New(mock.Agents())
 	m = press(t, m, "enter") // -> mode picker

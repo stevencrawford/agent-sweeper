@@ -214,13 +214,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selected = map[int]bool{}
 			m.err = ""
 			if m.mode == modeGit {
-				m.branches = model.GroupByRepoBranch(m.agents[m.agentIdx].Sessions)
+				m.branches = model.GroupByRepoBranch(onlyWithRepo(m.agents[m.agentIdx].Sessions))
 				m.screen = screenBranch
 			} else {
 				m.groups = model.GroupByCWD(m.agents[m.agentIdx].Sessions)
 				m.screen = screenDir
 			}
 		case "esc":
+			m.cursor = 0
 			m.screen = screenAgent
 		}
 	case screenDir:
@@ -243,6 +244,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = screenAge
 			}
 		case "esc":
+			// Return to the mode picker with the cursor restored to the
+			// currently-selected mode, so backing out of a directory list
+			// and choosing git mode is a clean pivot rather than a stuck
+			// cursor (the dir cursor can exceed the mode picker's range).
+			m.cursor = int(m.mode)
 			m.screen = screenMode
 		}
 	case screenBranch:
@@ -265,6 +271,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = screenAge
 			}
 		case "esc":
+			// Same pivot: restore the cursor to the current mode so the user
+			// can flip from git mode to directory mode (or back) cleanly.
+			m.cursor = int(m.mode)
 			m.screen = screenMode
 		}
 	case screenAge:
@@ -587,6 +596,20 @@ func (m *Model) viewAfter() string {
 
 // err stores the transient picker error, surfaced in the dir view.
 
+// onlyWithRepo keeps sessions whose repo identity resolved; git-repo mode
+// (13) only offers sessions that landed in a repo, everything else is swept
+// via directory mode.
+func onlyWithRepo(sessions []model.Session) []model.Session {
+	kept := sessions[:0]
+	for _, s := range sessions {
+		if s.Repo != "" {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// groupBytes returns the reclaimable footprint of a directory group.
 func groupBytes(g model.Group) int64 {
 	var total int64
 	for _, s := range g.Sessions {
