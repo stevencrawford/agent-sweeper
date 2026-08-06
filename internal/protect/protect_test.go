@@ -146,3 +146,29 @@ func TestIsTokenNoPartialMatch(t *testing.T) {
 		t.Fatal("-c should match as a whole token")
 	}
 }
+
+func TestDetectPropagatesChildProtectionToRoot(t *testing.T) {
+	now := time.Now()
+	day := 24 * time.Hour
+	tree := []model.Session{
+		{ID: "root", Children: []string{"child-1", "child-2"}, LastActivity: now.Add(-3 * day)},
+		{ID: "child-1", Children: []string{"grand-1"}, LastActivity: now.Add(-3 * day)},
+		{ID: "child-2", LastActivity: now.Add(-3 * day)},
+		{ID: "grand-1", LastActivity: now.Add(-3 * day)},
+	}
+	// The grandchild is the only live member; its reason must fold up to the
+	// root so a subtree sweep never touches an open descendant.
+	rep := Detect(tree, nil, []Mark{{ID: "grand-1", Reason: ReasonRunning}}, nil, now)
+	if rep["grand-1"] != ReasonRunning {
+		t.Fatalf("grandchild = %q, want running", rep["grand-1"])
+	}
+	if rep["child-1"] != ReasonRunning {
+		t.Fatalf("child-1 = %q, want running (propagated)", rep["child-1"])
+	}
+	if rep["root"] != ReasonRunning {
+		t.Fatalf("root = %q, want running (propagated)", rep["root"])
+	}
+	if _, ok := rep["child-2"]; ok {
+		t.Fatalf("child-2 must not be protected, got %v", rep)
+	}
+}

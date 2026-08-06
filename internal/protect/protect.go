@@ -125,7 +125,58 @@ func Detect(sessions []model.Session, argvIDs, markerIDs []Mark, resumeDirs []st
 		}
 	}
 
+	// 4. Subtree propagation: a session is active if any of its confirmed
+	// descendants (opencode compacted children) is active, so sweeping one
+	// never deletes a child that is itself open. Runs after all exact signals
+	// so the highest-priority reason across the tree wins.
+	propagate(sessions, rep, byID)
+
 	return rep
+}
+
+// propagate protects a session whose descendants are protected, folding a
+// child's reason up the tree so a subtree is never partially live. It walks to
+// a fixpoint because a newly-protected child can newly protect its own parent
+// in the same scan.
+func propagate(sessions []model.Session, rep Report, _ map[string]model.Session) {
+	changed := true
+	for changed {
+		changed = false
+		for _, s := range sessions {
+			if len(s.Children) == 0 {
+				continue
+			}
+			if _, seen := rep[s.ID]; seen {
+				continue
+			}
+			var best Reason
+			var found bool
+			for _, c := range s.Children {
+				r, ok := rep[c]
+				if !ok {
+					continue
+				}
+				if !found || reasonRank(r) > reasonRank(best) {
+					best = r
+					found = true
+				}
+			}
+			if found {
+				rep[s.ID] = best
+				changed = true
+			}
+		}
+	}
+}
+
+// reasonRank returns ReasonOrder precedence as a number; higher wins.
+func reasonRank(r Reason) int {
+	for i, x := range ReasonOrder {
+		if x == r {
+			return len(ReasonOrder) - i
+		}
+	}
+	return 0
 }
 
 // newestInDir returns the session whose LastActivity is newest among the

@@ -50,6 +50,10 @@ type Action struct {
 	SQL    string
 	Args   []any
 	Bytes  int64 // filesystem bytes reclaimable by a remove action
+	// StoreBytes is the estimated SQLite row bytes this SQL action deletes.
+	// SQLite only returns those bytes to disk after a VACUUM, so they are
+	// reported separately from Bytes (engine.Reclaim counts Bytes).
+	StoreBytes int64
 }
 
 // SessionPlan is the ordered set of actions that delete one session and all
@@ -86,6 +90,17 @@ func (p *SessionPlan) HasStoreActions() bool {
 	return false
 }
 
+// StoreBytes returns the estimated SQLite row bytes this plan deletes, freed
+// only after a VACUUM. Kept separate from Reclaim so an "immediate" footprint
+// is never inflated by rows that stay on disk.
+func (p *SessionPlan) StoreBytes() int64 {
+	var total int64
+	for _, a := range p.Actions {
+		total += a.StoreBytes
+	}
+	return total
+}
+
 // Plan is the fixed unit the dry-run renders and the confirmed sweep
 // executes. It is built once, before any interaction, so the before-footprint
 // it reports is exactly what the engine will reclaim.
@@ -118,4 +133,31 @@ func (p *Plan) HasStoreActions() bool {
 		}
 	}
 	return false
+}
+
+// StoreBytes returns the estimated SQLite row bytes the plan's sweeps free
+// after a VACUUM, summed across sessions.
+func (p *Plan) StoreBytes() int64 {
+	var total int64
+	for _, s := range p.Sessions {
+		total += s.StoreBytes()
+	}
+	return total
+}
+
+// Stores returns the distinct SQLite store paths this plan mutates, in first
+// encounter order. Used to offer a post-sweep VACUUM only for stores whose
+// rows were actually touched.
+func (p *Plan) Stores() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range p.Sessions {
+		for _, a := range s.Actions {
+			if (a.Kind == SQLDelete || a.Kind == StripKV) && a.Store != "" && !seen[a.Store] {
+				seen[a.Store] = true
+				out = append(out, a.Store)
+			}
+		}
+	}
+	return out
 }

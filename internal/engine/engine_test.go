@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -350,7 +351,6 @@ func TestReclaimTotalsAndVacuumHint(t *testing.T) {
 }
 
 func TestDryRunPlanEqualsExecution(t *testing.T) {
-	// A codex-shaped session: rollout file + shell snapshot + index line + row.
 	dir := t.TempDir()
 	rollout := filepath.Join(dir, "rollout-a.jsonl")
 	shellDir := filepath.Join(dir, "shell_snapshots")
@@ -380,5 +380,97 @@ func TestDryRunPlanEqualsExecution(t *testing.T) {
 	}
 	if data := readFile(t, index); strings.Contains(string(data), `"id":"a"`) {
 		t.Fatalf("index line for a remains:\n%s", data)
+	}
+}
+
+func TestVacuumFreesFreelistBytes(t *testing.T) {
+	path := newDB(t, "CREATE TABLE t (id TEXT PRIMARY KEY, data TEXT);")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 200 {
+		if _, err := db.Exec("INSERT INTO t VALUES (?, ?)", fmt.Sprintf("r%d", i), strings.Repeat("x", 1000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	sizes, err := VacuumSizes(context.Background(), []string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sizes) != 1 {
+		t.Fatalf("vacuum sizes = %d entries, want 1", len(sizes))
+	}
+	if sizes[0].FreelistBytes != 0 {
+		t.Fatalf("freelist before delete = %d, want 0", sizes[0].FreelistBytes)
+	}
+
+	plan := &Plan{Sessions: []*SessionPlan{{
+		ID: "r1", Agent: "OpenCode",
+		Actions: []Action{{Kind: SQLDelete, Store: path, SQL: "DELETE FROM t", Bytes: 100}},
+	}}}
+	Execute(context.Background(), plan)
+
+	sizes2, err := VacuumSizes(context.Background(), []string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sizes2[0].FreelistBytes <= 0 {
+		t.Fatalf("freelist after delete = %d, want > 0", sizes2[0].FreelistBytes)
+	}
+
+	freed, err := Vacuum(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed <= 0 {
+		t.Fatalf("vacuum freed %d bytes, want > 0", freed)
+	}
+	sizes3, err := VacuumSizes(context.Background(), []string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sizes3[0].FreelistBytes != 0 {
+		t.Fatalf("freelist after vacuum = %d, want 0", sizes3[0].FreelistBytes)
+	}
+	if n := countRows(t, path, "SELECT COUNT(*) FROM t"); n != 0 {
+		t.Fatalf("rows after vacuum = %d, want 0", n)
+	}
+}
+
+func TestVacuumMissingStoreIsNoop(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.db")
+	if freed, err := Vacuum(context.Background(), missing); err != nil || freed != 0 {
+		t.Fatalf("vacuum missing = %d, %v; want 0, nil", freed, err)
+	}
+	if sizes, err := VacuumSizes(context.Background(), []string{missing}); err != nil || len(sizes) != 0 {
+		t.Fatalf("sizes missing = %v, %v; want empty, nil", sizes, err)
+	}
+}
+
+func TestPlanStoresAndStoreBytes(t *testing.T) {
+	storeA := newDB(t, "CREATE TABLE t (id TEXT PRIMARY KEY);")
+	storeB := newDB(t, "CREATE TABLE t (id TEXT PRIMARY KEY);")
+	plan := &Plan{Sessions: []*SessionPlan{
+		{ID: "a", Agent: "X", Actions: []Action{
+			{Kind: SQLDelete, Store: storeA, SQL: "DELETE FROM t", StoreBytes: 40},
+			{Kind: SQLDelete, Store: storeA, SQL: "DELETE FROM t", StoreBytes: 10},
+		}},
+		{ID: "b", Agent: "X", Actions: []Action{
+			{Kind: SQLDelete, Store: storeB, SQL: "DELETE FROM t", StoreBytes: 30},
+			{Kind: RemoveFile, Path: "/tmp/nope", Bytes: 5},
+		}},
+	}}
+	if got := plan.StoreBytes(); got != 80 {
+		t.Fatalf("plan store bytes = %d, want 80", got)
+	}
+	stores := plan.Stores()
+	if len(stores) != 2 || stores[0] != storeA || stores[1] != storeB {
+		t.Fatalf("plan stores = %v, want [%s %s]", stores, storeA, storeB)
+	}
+	if !plan.HasStoreActions() {
+		t.Fatal("HasStoreActions = false, want true")
 	}
 }

@@ -31,17 +31,25 @@ type Session struct {
 	Branch       string // branch at session time (git-repo mode)
 	LastActivity time.Time
 	// SizeBytes is the detection-time raw size across the session's stores.
-	// It is never displayed directly; the reclaim footprint shown everywhere
-	// is ReclaimBytes (see engine.SessionReclaim), which counts only the
-	// filesystem bytes the session's deletion plan removes.
+	// It is never displayed directly.
 	SizeBytes int64
 	// ReclaimBytes is the plan-based footprint: Remove* artifact bytes this
-	// session's sweep reclaims. It is the number stats and the sweep dry-run
-	// both report. Kept separate from SizeBytes so DB-row bulk (which SQLite
-	// only frees after VACUUM) is never mistaken for reclaim.
+	// session's sweep reclaims immediately. It is the filesystem portion of
+	// the footprint reported by stats and the sweep dry-run.
 	ReclaimBytes int64
+	// StoreBytes is the estimated SQLite row bytes a sweep of this session
+	// frees after a VACUUM: the data bytes of the message/part/event/etc rows
+	// its plan deletes. SQLite only returns this to disk after a VACUUM, so it
+	// is surfaced alongside ReclaimBytes, never lumped into an "immediate"
+	// reclaim number.
+	StoreBytes int64
+	// Children lists the descendant session ids this session owns (opencode
+	// compacted/abstract children reachable via parent_id). Sweeping this
+	// session deletes its whole subtree; children are not listed standalone
+	// (decision: recurse children).
+	Children []string
 	// TouchesStore reports whether deleting this session removes SQLite rows
-	// or KV entries, whose file size is unchanged until VACUUM. Surfaced by
+	// or KV entries, whose surface is unchanged until VACUUM. Surfaced by
 	// stats as the store-row count.
 	TouchesStore bool
 	// Active is true when the session is currently open; such sessions are
@@ -70,11 +78,12 @@ func (a *Agent) SessionCount() int {
 }
 
 // Footprint returns the total reclaimable bytes across all of the agent's
-// sessions — the same plan-based number stats and the sweep dry-run report.
+// sessions — the merged number (filesystem bytes plus SQLite row bytes that a
+// VACUUM frees) that stats and the sweep dry-run report.
 func (a *Agent) Footprint() int64 {
 	var total int64
 	for _, s := range a.Sessions {
-		total += s.ReclaimBytes
+		total += s.ReclaimBytes + s.StoreBytes
 	}
 	return total
 }
