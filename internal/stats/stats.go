@@ -1,7 +1,9 @@
 // Package stats implements the `stats` command: a one-shot table of each
 // agent's session count, reclaimable footprint, and store-row sessions, plus
-// a grand-total row. Footprint is computed with the same shared function the
-// sweep dry-run uses, so the two surfaces report identical numbers.
+// a grand-total row. Footprint is the merged reclaim (filesystem bytes plus
+// estimated SQLite row bytes a VACUUM would free), computed with the same
+// shared function the sweep dry-run uses, so the two surfaces report
+// identical numbers.
 package stats
 
 import (
@@ -40,7 +42,7 @@ func Compute(agents []model.Agent) Summary {
 		row := Row{Agent: a.Name, Missing: !a.Found}
 		for _, sess := range a.Sessions {
 			row.Sessions++
-			row.Reclaim += engine.SessionReclaim(sess)
+			row.Reclaim += engine.SessionFootprint(sess)
 			if engine.SessionTouchesStore(sess) {
 				row.StoreRows++
 			}

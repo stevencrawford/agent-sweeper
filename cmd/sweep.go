@@ -31,6 +31,7 @@ var sweepFlags struct {
 	json   bool
 	quiet  bool
 	dryRun bool
+	vacuum bool
 }
 
 var sweepCmd = &cobra.Command{
@@ -56,14 +57,15 @@ func init() {
 	f.BoolVar(&sweepFlags.dryRun, "dry-run", false, "print the plan and exit without deleting (works with or without --yes)")
 	f.BoolVar(&sweepFlags.json, "json", false, "emit machine-readable JSON")
 	f.BoolVar(&sweepFlags.quiet, "quiet", false, "print a one-line summary only")
+	f.BoolVar(&sweepFlags.vacuum, "vacuum", false, "run VACUUM on swept stores after deleting rows (with --yes)")
 	rootCmd.AddCommand(sweepCmd)
 }
 
 func runSweep(*cobra.Command, []string) error {
-	inv := inventory.Find()
 	if sweepFlags.demo {
 		return runSweepDemo()
 	}
+	inv := withSpinner("indexing session stores", inventory.Find)
 	if sweepFlags.agent != "" || sweepFlags.yes || sweepFlags.dryRun {
 		return runSweepScripted(inv)
 	}
@@ -73,10 +75,14 @@ func runSweep(*cobra.Command, []string) error {
 // runSweepInteractive starts the bubbletea TUI over the real agents and their
 // plans, protecting active sessions against a live scan. It renders inline
 // (no alternate screen) so the terminal scrollback and surrounding context stay
-// intact.
+// intact. Only agents discovered on this machine are offered.
 func runSweepInteractive(inv inventory.Inventory) error {
+	agents := inv.Discovered()
+	if len(agents) == 0 {
+		return fmt.Errorf("no agent session stores found on this machine")
+	}
 	p := tea.NewProgram(
-		tui.NewWithProtection(inv.Agents, protect.ScanOne, inv.Plans),
+		tui.NewWithProtection(agents, protect.ScanOne, inv.Plans),
 		tea.WithInputTTY())
 	_, err := p.Run()
 	return err
@@ -121,7 +127,79 @@ func runSweepScripted(inv inventory.Inventory) error {
 		return writeDryRunResult(plan, age, agent.Name)
 	}
 	res := engine.Execute(context.Background(), plan)
-	return writeSweepResult(res, plan, agent.Name)
+	if err := writeSweepResult(res, plan, agent.Name); err != nil {
+		return err
+	}
+	return maybeVacuum(context.Background(), plan)
+}
+
+// maybeVacuum offers the post-sweep VACUUM that turns deleted SQLite rows back
+// into free disk. In --yes automation it runs only when --vacuum is passed; a
+// --vacuum without --yes (interactive) still asks the user to confirm because
+// VACUUM rewrites the whole store file and needs an exclusive lock. A store
+// held by a live agent process is skipped.
+func maybeVacuum(ctx context.Context, plan *engine.Plan) error {
+	stores := plan.Stores()
+	if len(stores) == 0 {
+		return nil
+	}
+	if !sweepFlags.vacuum {
+		if !sweepFlags.quiet && !sweepFlags.json {
+			fmt.Fprintln(os.Stderr, "store rows were deleted — pass --vacuum to VACUUM the SQLite file and return the space to disk")
+		}
+		return nil
+	}
+	sizes, err := engine.VacuumSizes(ctx, stores)
+	if err != nil {
+		return err
+	}
+	anyRows := false
+	for _, info := range sizes {
+		if info.FreelistBytes > 0 {
+			anyRows = true
+		}
+	}
+	if !sweepFlags.yes && !sweepFlags.quiet && !sweepFlags.json {
+		fmt.Printf("VACUUM would free %s across %d SQLite file(s) — confirm? [y/N] ",
+			units.Bytes(totalFree(sizes)), len(sizes))
+		var reply string
+		if _, err := fmt.Scanln(&reply); err != nil {
+			reply = ""
+		}
+		if reply != "y" && reply != "Y" && reply != "yes" {
+			return nil
+		}
+	}
+	if !anyRows {
+		return nil
+	}
+	var total int64
+	for _, info := range sizes {
+		freed, err := engine.Vacuum(ctx, info.Store)
+		if err != nil {
+			if !sweepFlags.quiet {
+				fmt.Fprintf(os.Stderr, "vacuum %s: %v\n", info.Store, err)
+			}
+			continue
+		}
+		total += freed
+		if !sweepFlags.quiet && !sweepFlags.json {
+			fmt.Printf("vacuumed %s, freed %s\n", info.Store, units.Bytes(freed))
+		}
+	}
+	if sweepFlags.json {
+		out := map[string]any{"vacuumed": true, "vacuumedBytes": total}
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	return nil
+}
+
+func totalFree(sizes []engine.VacuumInfo) int64 {
+	var total int64
+	for _, info := range sizes {
+		total += info.FreelistBytes
+	}
+	return total
 }
 
 // buildScriptedPlan applies the mode/dir/repo/branch filters, the age bucket,
@@ -235,7 +313,11 @@ func printDryRun(plan *engine.Plan, age model.Age, agent string) {
 	for _, sp := range plan.Sessions {
 		fmt.Printf("  delete %s (%s, %s)\n", sp.ID, sp.Title, units.Bytes(sp.Reclaim()))
 	}
-	fmt.Printf("would delete %d sessions, reclaiming %s\n", plan.SessionCount(), units.Bytes(plan.Reclaim()))
+	total := plan.Reclaim()
+	fmt.Printf("would delete %d sessions, reclaiming %s\n", plan.SessionCount(), units.Bytes(total))
+	if st := plan.StoreBytes(); st > 0 {
+		fmt.Printf("  …plus %s in SQLite rows freed by a post-sweep VACUUM\n", units.Bytes(st))
+	}
 }
 
 // sessionOutcome is one session's result in the JSON report.
@@ -243,6 +325,7 @@ type sessionOutcome struct {
 	ID           string `json:"id"`
 	Title        string `json:"title"`
 	ReclaimBytes int64  `json:"reclaimBytes"`
+	StoreBytes   int64  `json:"storeBytes"`
 	OK           bool   `json:"ok"`
 	Error        string `json:"error,omitempty"`
 }
@@ -255,6 +338,7 @@ type sweepReport struct {
 	Deleted        int              `json:"deleted"`
 	Failed         int              `json:"failed"`
 	ReclaimedBytes int64            `json:"reclaimedBytes"`
+	StoreBytes     int64            `json:"storeBytes"`
 	NeedsVacuum    bool             `json:"needsVacuum"`
 	Sessions       []sessionOutcome `json:"sessions"`
 }
@@ -273,9 +357,10 @@ func writeDryRunResult(plan *engine.Plan, age model.Age, agent string) error {
 	for _, sp := range plan.Sessions {
 		rep.Requested++
 		rep.ReclaimedBytes += sp.Reclaim()
+		rep.StoreBytes += sp.StoreBytes()
 		rep.NeedsVacuum = rep.NeedsVacuum || sp.HasStoreActions()
 		rep.Sessions = append(rep.Sessions, sessionOutcome{
-			ID: sp.ID, Title: sp.Title, ReclaimBytes: sp.Reclaim(), OK: true,
+			ID: sp.ID, Title: sp.Title, ReclaimBytes: sp.Reclaim(), StoreBytes: sp.StoreBytes(), OK: true,
 		})
 	}
 	enc := json.NewEncoder(os.Stdout)
@@ -293,16 +378,18 @@ func writeSweepResult(res *engine.Result, plan *engine.Plan, agent string) error
 			NeedsVacuum:    res.NeedsVacuum(),
 			Sessions:       make([]sessionOutcome, 0, len(res.Sessions)),
 		}
-		for _, sr := range res.Sessions {
+	for _, sr := range res.Sessions {
 			o := sessionOutcome{
 				ID:           sr.Session.ID,
 				Title:        sr.Session.Title,
 				ReclaimBytes: sr.Session.Reclaim(),
+				StoreBytes:   sr.Session.StoreBytes(),
 				OK:           sr.Err == nil,
 			}
 			if sr.Err != nil {
 				o.Error = sr.Err.Error()
 			}
+			rep.StoreBytes += o.StoreBytes
 			rep.Sessions = append(rep.Sessions, o)
 		}
 		enc := json.NewEncoder(os.Stdout)
@@ -315,11 +402,14 @@ func writeSweepResult(res *engine.Result, plan *engine.Plan, agent string) error
 		return nil
 	}
 	fmt.Printf("deleted %d sessions from %s, reclaiming %s\n", res.Deleted(), agent, units.Bytes(res.BytesReclaimed()))
+	if st := plan.StoreBytes(); st > 0 {
+		fmt.Fprintf(os.Stderr, "…%s more in SQLite rows will be freed by a VACUUM\n", units.Bytes(st))
+	}
 	if n := res.Failed(); n > 0 {
 		fmt.Fprintf(os.Stderr, "%d sessions failed and were left for a re-run\n", n)
 	}
-	if res.NeedsVacuum() {
-		fmt.Fprintln(os.Stderr, "store rows were deleted — the SQLite file only shrinks after a VACUUM")
+	if res.NeedsVacuum() && !sweepFlags.vacuum {
+		fmt.Fprintln(os.Stderr, "store rows were deleted — pass --vacuum to return the space to disk")
 	}
 	return nil
 }

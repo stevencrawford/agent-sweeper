@@ -99,6 +99,18 @@ type Model struct {
 	// result is the engine outcome of the confirmed sweep, rendered on the
 	// after screen.
 	result *engine.Result
+	// vacuum stores the post-sweep stores whose rows were deleted, surfaced as
+	// an offer to run VACUUM on the after screen. Nil when nothing was deleted
+	// from an SQLite store.
+	vacuumStores []string
+	// vacuuming reports whether a VACUUM is running (after screen spins until
+	// it completes).
+	vacuuming bool
+	// vacuumed reports the byte total freed by the post-sweep VACUUM, or -1
+	// when the user skipped it.
+	vacuumed int64
+	// vacuumSkipped records an explicit "no" so the after screen stops asking.
+	vacuumSkipped bool
 }
 
 // New builds the sweep TUI over the given agents.
@@ -107,6 +119,7 @@ func New(agents []model.Agent) *Model {
 		agents:   agents,
 		selected: map[int]bool{},
 		active:   map[string]protect.Reason{},
+		vacuumed: -1,
 	}
 }
 
@@ -178,10 +191,18 @@ func (m *Model) Init() tea.Cmd {
 
 type progressMsg float64
 
-// sweepResult carries the engine outcome of a confirmed sweep.
+// sweepResult carries the engine outcome of a confirmed sweep plus the SQLite
+// stores whose rows were deleted (for the post-sweep VACUUM offer).
 type sweepResult struct {
 	plan *engine.Plan
 	res  *engine.Result
+	// stores lists the distinct SQLite store paths the plan deleted rows from.
+	stores []string
+}
+
+// vacuumResult reports the bytes a post-sweep VACUUM freed.
+type vacuumResult struct {
+	freed int64
 }
 
 // Update implements tea.Model.
@@ -201,6 +222,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.advanceProgress()
 	case sweepResult:
 		m.result = msg.res
+		m.vacuumStores = msg.stores
+		m.done = true
+		m.screen = screenAfter
+		return m, nil
+	case vacuumResult:
+		m.vacuuming = false
+		m.vacuumed = msg.freed
 		m.done = true
 		m.screen = screenAfter
 		return m, nil
@@ -398,7 +426,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						continue
 					}
 					kept = append(kept, s)
-					reclaim += engine.SessionReclaim(s)
+					reclaim += engine.SessionFootprint(s)
 				}
 				m.matches = kept
 				m.reclaimBytes = reclaim
@@ -429,6 +457,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			return m, tea.Quit
+		case "y", "Y":
+			if len(m.vacuumStores) > 0 && !m.vacuuming && m.vacuumed < 0 && !m.vacuumSkipped {
+				m.vacuuming = true
+				m.done = false
+				return m, m.runVacuum()
+			}
+		case "n", "N":
+			if len(m.vacuumStores) > 0 && !m.vacuuming && m.vacuumed < 0 && !m.vacuumSkipped {
+				m.vacuumSkipped = true
+			}
 		}
 	}
 	return m, nil
@@ -467,9 +505,28 @@ func (m *Model) buildPlan(agent model.Agent) *engine.Plan {
 
 // runSweep executes the plan off the UI thread and reports the outcome.
 func (m *Model) runSweep(plan *engine.Plan) tea.Cmd {
+	stores := plan.Stores()
 	return func() tea.Msg {
 		res := engine.Execute(context.Background(), plan)
-		return sweepResult{plan: plan, res: res}
+		return sweepResult{plan: plan, res: res, stores: stores}
+	}
+}
+
+// runVacuum triggers the post-sweep VACUUM of every SQLite store the sweep
+// touched, reporting the total bytes freed.
+func (m *Model) runVacuum() tea.Cmd {
+	stores := m.vacuumStores
+	ctx := context.Background()
+	return func() tea.Msg {
+		var total int64
+		for _, s := range stores {
+			freed, err := engine.Vacuum(ctx, s)
+			if err != nil {
+				continue
+			}
+			total += freed
+		}
+		return vacuumResult{freed: total}
 	}
 }
 
@@ -497,7 +554,7 @@ func (m *Model) computeMatches() {
 				continue
 			}
 			matches = append(matches, s)
-			reclaim += engine.SessionReclaim(s)
+			reclaim += engine.SessionFootprint(s)
 		}
 	}
 	m.matches = matches
@@ -665,7 +722,7 @@ func (m *Model) viewDryRun() string {
 			if m.mode == modeGit && s.Branch != "" {
 				extra = " " + dimStyle.Render(s.Branch)
 			}
-			rows = append(rows, fmt.Sprintf("   %-42s %-10s %9s%s", s.Title, s.ID, units.Bytes(engine.SessionReclaim(s)), extra))
+			rows = append(rows, fmt.Sprintf("   %-42s %-10s %9s%s", s.Title, s.ID, units.Bytes(engine.SessionFootprint(s)), extra))
 		}
 	}
 	lo, hi := windowFor(m.offset, len(rows), viewportRows(m))
@@ -731,8 +788,18 @@ func (m *Model) viewAfter() string {
 		if n := m.result.Failed(); n > 0 {
 			fmt.Fprintf(&b, "\n%s", warnStyle.Render(fmt.Sprintf("%d sessions failed and were left for a re-run", n)))
 		}
-		if m.result.NeedsVacuum() {
-			fmt.Fprintf(&b, "\n%s", warnStyle.Render("store rows were deleted — the SQLite file only shrinks after a VACUUM"))
+		if m.vacuuming {
+			b.WriteString("\n\n" + dimStyle.Render("vacuuming SQLite stores…"))
+			return b.String()
+		}
+		if m.vacuumSkipped {
+			fmt.Fprintf(&b, "\n%s", dimStyle.Render("skipped VACUUM — SQLite rows stay in the file until one runs"))
+		} else if m.vacuumed >= 0 {
+			fmt.Fprintf(&b, "\n%s", okStyle.Render(fmt.Sprintf(
+				"VACUUM freed %s", units.Bytes(m.vacuumed))))
+		} else if len(m.vacuumStores) > 0 {
+			fmt.Fprintf(&b, "\n%s", warnStyle.Render(
+				"store rows were deleted — run a VACUUM to return that space to disk? (y/n)"))
 		}
 	} else {
 		fmt.Fprintf(&b, "\nReclaimed %s from %s across %d sessions.", units.Bytes(m.reclaimBytes), agent.Name, len(m.matches))
@@ -760,7 +827,7 @@ func onlyWithRepo(sessions []model.Session) []model.Session {
 func groupBytes(g model.Group) int64 {
 	var total int64
 	for _, s := range g.Sessions {
-		total += engine.SessionReclaim(s)
+		total += engine.SessionFootprint(s)
 	}
 	return total
 }
@@ -768,7 +835,7 @@ func groupBytes(g model.Group) int64 {
 func branchGroupBytes(bg model.BranchGroup) int64 {
 	var total int64
 	for _, s := range bg.Sessions {
-		total += engine.SessionReclaim(s)
+		total += engine.SessionFootprint(s)
 	}
 	return total
 }

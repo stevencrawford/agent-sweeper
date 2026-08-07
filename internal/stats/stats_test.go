@@ -59,3 +59,40 @@ func TestRenderIncludesHeaderRowsAndTotal(t *testing.T) {
 		t.Fatalf("render should format reclaim bytes via units.Bytes:\n%s", out)
 	}
 }
+
+func TestFootprintIncludesStoreBytes(t *testing.T) {
+	agents := []model.Agent{{
+		Name: "OpenCode",
+		Sessions: []model.Session{
+			{ReclaimBytes: 1000, StoreBytes: 5000, TouchesStore: true},
+			{ReclaimBytes: 2000, StoreBytes: 3000, TouchesStore: true},
+		},
+	}}
+	s := Compute(agents)
+	row := s.Rows[0]
+	// Reclaim is the merged footprint: filesystem bytes plus SQLite row bytes.
+	if row.Reclaim != 11000 {
+		t.Fatalf("reclaim = %d, want 11000 (merged fs + store bytes)", row.Reclaim)
+	}
+	if row.StoreRows != 2 {
+		t.Fatalf("store rows = %d, want 2", row.StoreRows)
+	}
+	if a := agents[0].Footprint(); a != 11000 {
+		t.Fatalf("agent footprint = %d, want 11000", a)
+	}
+}
+
+// TestRenderEmptySummary checks that a summary with no agent rows (nothing
+// discovered) still renders a header and a zeroed total without panicking.
+func TestRenderEmptySummary(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, Summary{}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"AGENT", "SESSIONS", "TOTAL", "0B"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("empty render missing %q:\n%s", want, out)
+		}
+	}
+}

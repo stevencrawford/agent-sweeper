@@ -110,3 +110,14 @@ func TestPickAgentKnownAndUnknown(t *testing.T) {
 		t.Fatal("unknown agent must error")
 	}
 }
+
+// TestWithSpinnerRunsFn checks that the indeterminate indicator is a pure
+// wrapper: fn always runs and its result is returned. In tests stderr is not a
+// terminal, so the spinner path exercises the passthrough branch; the animated
+// branch is terminal-only by design.
+func TestWithSpinnerRunsFn(t *testing.T) {
+	got := withSpinner("indexing", func() int { return 42 })
+	if got != 42 {
+		t.Fatalf("withSpinner returned %d, want 42", got)
+	}
+}

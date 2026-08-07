@@ -36,6 +36,20 @@ func (in *Inventory) Plan(agent model.Agent, s model.Session) *engine.SessionPla
 	return in.Plans[PlanKey(agent.Name, s.ID)]
 }
 
+// Discovered returns only the agents that were actually found on the machine
+// with at least one session. Missing stores (Found=false) and found stores
+// whose sessions all reclaimed nothing are dropped, so callers can render
+// exactly what exists without needing to special-case the absent agents.
+func (in *Inventory) Discovered() []model.Agent {
+	agents := make([]model.Agent, 0, len(in.Agents))
+	for _, a := range in.Agents {
+		if a.Found && len(a.Sessions) > 0 {
+			agents = append(agents, a)
+		}
+	}
+	return agents
+}
+
 // Find enumerates every known agent's real session store. Missing or unreadable
 // stores yield an agent with Found=false and no sessions. Detection never
 // mutates a store: the SQLite readers open read-only and the file walks only
@@ -90,9 +104,20 @@ func (in *Inventory) add(e enumerator) {
 	for i := range sessions {
 		plan := planBuilderFor(a.Name, root, &sessions[i])
 		sessions[i].ReclaimBytes = plan.Reclaim()
+		sessions[i].StoreBytes = plan.StoreBytes()
 		sessions[i].TouchesStore = plan.HasStoreActions()
 		in.Plans[PlanKey(a.Name, sessions[i].ID)] = plan
 	}
-	a.Sessions = sessions
+
+	// Drop sessions whose sweep reclaims nothing (zero filesystem and zero
+	// store rows) so empty sub-agent rows never clutter stats or the sweep.
+	kept := sessions[:0]
+	for i := range sessions {
+		if sessions[i].ReclaimBytes == 0 && sessions[i].StoreBytes == 0 {
+			continue
+		}
+		kept = append(kept, sessions[i])
+	}
+	a.Sessions = kept
 	in.Agents = append(in.Agents, a)
 }

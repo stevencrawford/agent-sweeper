@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stevencrawford/agent-sweeper/internal/inventory"
+	"github.com/stevencrawford/agent-sweeper/internal/model"
 	"github.com/stevencrawford/agent-sweeper/internal/stats"
 )
 
@@ -20,7 +21,10 @@ var statsCmd = &cobra.Command{
 	Short: "Show each agent's session count and reclaimable footprint",
 	Args:  cobra.NoArgs,
 	RunE: func(*cobra.Command, []string) error {
-		var agents = inventory.Find().Agents
+		var agents = withSpinner("indexing session stores", func() []model.Agent {
+			inv := inventory.Find()
+			return inv.Discovered()
+		})
 		if statsFlags.demo {
 			agents = inventory.Demo()
 		}
