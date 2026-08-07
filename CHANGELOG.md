@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.2.0](https://github.com/stevencrawford/agent-sweeper/compare/v0.1.0...v0.2.0) - 2026-08-07
+
+### Other Changes
+- feat(store/cli): sweep-db-state — fold opencode subtrees, VACUUM, progress output by @stevencrawford in https://github.com/stevencrawford/agent-sweeper/pull/3
+
 ## [v0.1.0](https://github.com/stevencrawford/agent-sweeper/commits/v0.1.0) - 2026-08-05
 
 ## [Unreleased]
